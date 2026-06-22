@@ -1,92 +1,92 @@
 # Evolution Notify
 
-GLPI plugin that sends real-time WhatsApp notifications for ticket validations via [Evolution API](https://github.com/EvolutionAPI/evolution-api).
+Plugin GLPI que envia notificações WhatsApp em tempo real para validações de chamados via [Evolution API](https://github.com/EvolutionAPI/evolution-api).
 
-## Features
+## Funcionalidades
 
-- Sends WhatsApp messages when a ticket validation is **requested**, **approved**, or **refused**
-- Evolution API integration (self-hosted or cloud)
-- Configurable per event type (waiting / accepted / refused)
-- Test send button on config page
-- Multiple-approval flow support (GLPI 11)
-- Deduplication tracking to prevent duplicate notifications
-- Cron fallback for missed events
+- Envia mensagens WhatsApp quando uma validação de chamado é **solicitada**, **aprovada** ou **recusada**
+- Integração com Evolution API (self-hosted ou cloud)
+- Configurável por tipo de evento (aguardando / aprovado / recusado)
+- Botão de teste na página de configuração
+- Suporte a fluxo de múltiplas aprovações (GLPI 11)
+- Controle de deduplicação para evitar notificações duplicadas
+- Cron como fallback para eventos perdidos
 
-## Requirements
+## Requisitos
 
-- GLPI **10.0.x** or **11.0.x**
+- GLPI **10.0.x** ou **11.0.x**
 - PHP **8.1+**
-- An Evolution API instance (see [Evolution API docs](https://doc.evolution-api.com/v2))
+- Uma instância Evolution API (veja [documentação Evolution API](https://doc.evolution-api.com/v2))
 
-## Installation
+## Instalação
 
-1. Download the plugin and extract to the GLPI `marketplace/` directory:
+1. Baixe o plugin e extraia no diretório `marketplace/` do GLPI:
 
 ```bash
 unzip glpievolutionnotify.zip -d /var/glpi/marketplace/
 ```
 
-2. Rename directory if needed (must be `glpievolutionnotify`):
+2. Renomeie o diretório se necessário (deve ser `glpievolutionnotify`):
 
 ```bash
 mv /var/glpi/marketplace/glpievolutionnotify-main /var/glpi/marketplace/glpievolutionnotify
 ```
 
-3. Go to **Configuration → Plugins**, find *Evolution Notify* and click **Install** then **Enable**.
+3. Acesse **Configuração → Plugins**, localize *Evolution Notify* e clique em **Instalar** e depois **Ativar**.
 
-## Configuration
+## Configuração
 
-1. Go to **Configuration → Evolution Notify** in the GLPI menu.
-2. Fill in the Evolution API credentials:
-   - **API URL** — your Evolution API base URL (e.g. `https://evo.example.com`)
-   - **API Token** — your Evolution API authentication token
-   - **Instance** — the Evolution API instance name
-3. Select which events trigger notifications:
-   - Send when **Waiting** approval
-   - Send when **Accepted**
-   - Send when **Refused**
-4. Click **Save Settings**.
-5. Use the **Test Send** button to verify WhatsApp delivery.
+1. Acesse **Configuração → Evolution Notify** no menu do GLPI.
+2. Preencha as credenciais da Evolution API:
+   - **API URL** — URL base da sua Evolution API (ex: `https://evo.exemplo.com`)
+   - **API Token** — token de autenticação da Evolution API
+   - **Instance** — nome da instância na Evolution API
+3. Selecione quais eventos disparam notificações:
+   - Enviar quando **Aguardando** aprovação
+   - Enviar quando **Aprovado**
+   - Enviar quando **Recusado**
+4. Clique em **Salvar Configurações**.
+5. Use o botão **Testar Envio** para verificar a entrega no WhatsApp.
 
-## How it works
+## Como funciona
 
-### Hooks (real-time)
+### Hooks (tempo real)
 
-When a ticket validation is created or updated, the plugin hooks into `item_add` / `item_update` on `TicketValidation` / `CommonITILValidation` and sends the WhatsApp message immediately.
+Quando uma validação de chamado é criada ou atualizada, o plugin aciona os hooks `item_add` / `item_update` em `TicketValidation` / `CommonITILValidation` e envia a mensagem WhatsApp imediatamente.
 
 ### Cron (fallback)
 
-A cron task (`PluginGlpievolutionnotifyNotification::cronNotify`) runs every minute and processes any validations that were not caught by hooks. The tracking table `glpi_plugin_evolutionnotify_notified` prevents duplicate sends.
+Uma tarefa cron (`PluginGlpievolutionnotifyNotification::cronNotify`) é executada a cada minuto e processa validações que não foram capturadas pelos hooks. A tabela de controle `glpi_plugin_evolutionnotify_notified` evita envios duplicados.
 
-### GLPI 11 compatibility
+### Compatibilidade GLPI 11
 
-GLPI 11 introduced multi-step validation. The plugin handles:
-- `itemtype_target` / `items_id_target` for target user resolution
-- `comment_submission` / `comment_validation` fields for submission and approval comments
-- `\Glpi\Plugin\Hooks` constants when available
+O GLPI 11 introduziu validação em múltiplas etapas. O plugin lida com:
+- `itemtype_target` / `items_id_target` para resolução do usuário alvo
+- `comment_submission` / `comment_validation` para comentários de solicitação e aprovação
+- Constantes `\Glpi\Plugin\Hooks` quando disponíveis
 
 ## Logs
 
-Logs are written to `evolution_notify.log` in your GLPI log directory (`GLPI_LOG_DIR`). Useful for debugging delivery issues.
+Os logs são gravados em `evolution_notify.log` no diretório de logs do GLPI (`GLPI_LOG_DIR`). Útil para depurar problemas de entrega.
 
-## Files
+## Estrutura de arquivos
 
 ```
 glpievolutionnotify/
 ├── ajax/
-│   ├── save_config.php      # AJAX config save handler
-│   └── test_send.php        # AJAX test send handler
+│   ├── save_config.php      # Handler AJAX para salvar configuração
+│   └── test_send.php        # Handler AJAX para teste de envio
 ├── front/
-│   └── config.php           # Configuration page
+│   └── config.php           # Página de configuração
 ├── inc/
-│   └── notification.class.php  # Core logic (send, cron, dedup)
-├── hook.php                 # Install/uninstall + hook callbacks
-├── setup.php                # Plugin metadata + hook/cron registration
+│   └── notification.class.php  # Lógica principal (send, cron, dedup)
+├── hook.php                 # Install/uninstall + callbacks dos hooks
+├── setup.php                # Metadados do plugin + registro de hooks/cron
 └── README.md
 ```
 
-## License
+## Licença
 
-GNU General Public License v2.0 or later.
+GNU General Public License v2.0 ou posterior.
 
-See [LICENSE](https://www.gnu.org/licenses/gpl-2.0.html) for full text.
+Veja [LICENSE](https://www.gnu.org/licenses/gpl-2.0.html) para o texto completo.
