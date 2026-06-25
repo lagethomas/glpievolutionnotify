@@ -1,11 +1,5 @@
 <?php
 
-/**
- * GLPI Evolution Notify - AJAX save config endpoint.
- *
- * @license GPLv2+
- */
-
 declare(strict_types=1);
 
 if (!defined('GLPI_ROOT')) {
@@ -27,28 +21,44 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 Session::checkCSRF($_POST);
 
-$configTable = 'glpi_plugin_evolutionnotify_configs';
+$configTable  = 'glpi_plugin_evolutionnotify_configs';
+$entitiesId   = (int)($_POST['entities_id'] ?? 0);
 
 $data = [
-    'api_url'          => trim((string)($_POST['api_url'] ?? '')),
-    'api_token'        => trim((string)($_POST['api_token'] ?? '')),
-    'instance'         => trim((string)($_POST['instance'] ?? '')),
-    'send_on_waiting'  => isset($_POST['send_on_waiting']) ? 1 : 0,
-    'send_on_accepted' => isset($_POST['send_on_accepted']) ? 1 : 0,
-    'send_on_refused'  => isset($_POST['send_on_refused']) ? 1 : 0,
+    'entities_id'            => $entitiesId,
+    'api_url'                => trim((string)($_POST['api_url'] ?? '')),
+    'api_token'              => trim((string)($_POST['api_token'] ?? '')),
+    'instance'               => trim((string)($_POST['instance'] ?? '')),
+    'send_on_waiting'        => isset($_POST['send_on_waiting']) ? 1 : 0,
+    'send_on_accepted'       => isset($_POST['send_on_accepted']) ? 1 : 0,
+    'send_on_refused'        => isset($_POST['send_on_refused']) ? 1 : 0,
+    'send_on_ticket_created'  => isset($_POST['send_on_ticket_created']) ? 1 : 0,
+    'send_on_status_changed'  => isset($_POST['send_on_status_changed']) ? 1 : 0,
+    'send_on_solution_added'  => isset($_POST['send_on_solution_added']) ? 1 : 0,
+    'template_waiting'        => trim((string)($_POST['template_waiting'] ?? '')),
+    'template_accepted'       => trim((string)($_POST['template_accepted'] ?? '')),
+    'template_refused'        => trim((string)($_POST['template_refused'] ?? '')),
+    'template_ticket_created'  => trim((string)($_POST['template_ticket_created'] ?? '')),
+    'template_status_changed'  => trim((string)($_POST['template_status_changed'] ?? '')),
+    'template_solution_added'  => trim((string)($_POST['template_solution_added'] ?? '')),
 ];
 
-$iterator = $DB->request(['SELECT' => 'id', 'FROM' => $configTable, 'LIMIT' => 1]);
-$row      = count($iterator) > 0 ? $iterator->current() : null;
-
 try {
+    $iterator = $DB->request([
+        'SELECT' => 'id',
+        'FROM'   => $configTable,
+        'WHERE'  => ['entities_id' => $entitiesId],
+        'LIMIT'  => 1,
+    ]);
+    $row = count($iterator) > 0 ? $iterator->current() : null;
+
     if ($row) {
         $DB->update($configTable, $data, ['id' => $row['id']]);
     } else {
         $DB->insertOrDie($configTable, $data);
     }
 
-    Toolbox::logInFile('evolution_notify', "[CONFIG] Config saved via AJAX.\n", true);
+    Toolbox::logInFile('evolution_notify', "[CONFIG] Saved for entity #$entitiesId.\n", true);
 
     echo json_encode(['ok' => true, 'msg' => 'Configuração salva com sucesso!']);
 } catch (\Throwable $e) {

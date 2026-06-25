@@ -1,16 +1,38 @@
 # Evolution Notify
 
-Plugin GLPI que envia notificações WhatsApp em tempo real para validações de chamados via [Evolution API](https://github.com/EvolutionAPI/evolution-api).
+Plugin GLPI que envia notificações WhatsApp em tempo real para validações de chamados e outros eventos via [Evolution API](https://github.com/EvolutionAPI/evolution-api).
 
 ## Funcionalidades
 
-- Envia mensagens WhatsApp quando uma validação de chamado é **solicitada**, **aprovada** ou **recusada**
-- Integração com Evolution API (self-hosted ou cloud)
-- Configurável por tipo de evento (aguardando / aprovado / recusado)
-- Botão de teste na página de configuração
-- Suporte a fluxo de múltiplas aprovações (GLPI 11)
-- Controle de deduplicação para evitar notificações duplicadas
-- Cron como fallback para eventos perdidos
+- **Validações de chamados** — notifica quando uma validação é solicitada, aprovada ou recusada
+- **Notificação ao solicitante** — quando a validação é respondida, o autor do chamado é notificado
+- **Suporte a grupos** — quando o alvo da validação é um grupo, todos os membros são notificados
+- **Novo chamado** — avisa o solicitante quando o ticket é criado
+- **Mudança de status** — notifica quando o status do chamado é alterado
+- **Solução adicionada** — envia mensagem quando uma solução é registrada
+- **Multi-entidade** — configurações independentes por entidade GLPI
+- **Templates customizáveis** — edite o texto da mensagem com placeholders
+- **Webhook nativo GLPI 11** — endpoint para receber eventos diretamente do sistema de webhooks do GLPI
+- **Cron de fallback** — processa validações não capturadas pelos hooks
+- **Histórico de envios** — página com registro de todas as notificações enviadas
+- **Controle de deduplicação** — evita notificações duplicadas
+- **Teste de envio** — botão na página de configuração para testar a integração
+
+## Placeholders dos Templates
+
+| Placeholder | Descrição |
+|---|---|
+| `{ticket_id}` | ID do chamado |
+| `{ticket_title}` | Título do chamado |
+| `{status}` | Label do status (ex: "Aprovado") |
+| `{comment}` | Comentário da validação/solução |
+| `{comment_block}` | Bloco "Comentário:" + texto (vazio se sem comentário) |
+| `{requester}` | Nome do solicitante |
+| `{requester_id}` | ID do solicitante |
+| `{approver}` | Nome do aprovador |
+| `{approver_id}` | ID do aprovador |
+| `{url}` | Link direto para o chamado |
+| `{glpi_url}` | URL base do GLPI |
 
 ## Requisitos
 
@@ -36,38 +58,29 @@ mv /var/glpi/marketplace/glpievolutionnotify-main /var/glpi/marketplace/glpievol
 
 ## Configuração
 
-1. Acesse **Configuração → Evolution Notify** no menu do GLPI.
-2. Preencha as credenciais da Evolution API:
+1. Acesse **Administração → Evolution Notify** no menu do GLPI.
+2. Selecione a entidade (opcional).
+3. Preencha as credenciais da Evolution API:
    - **API URL** — URL base da sua Evolution API (ex: `https://evo.exemplo.com`)
    - **API Token** — token de autenticação da Evolution API
    - **Instance** — nome da instância na Evolution API
-3. Selecione quais eventos disparam notificações:
-   - Enviar quando **Aguardando** aprovação
-   - Enviar quando **Aprovado**
-   - Enviar quando **Recusado**
-4. Clique em **Salvar Configurações**.
-5. Use o botão **Testar Envio** para verificar a entrega no WhatsApp.
+4. Marque quais eventos devem disparar notificações.
+5. Edite os templates das mensagens conforme desejado.
+6. Clique em **Salvar Configurações**.
+7. Use o botão **Testar Envio** para verificar a entrega no WhatsApp.
 
-## Como funciona
+## Webhook Nativo (GLPI 11)
 
-### Hooks (tempo real)
+1. No GLPI, acesse **Configuração → Webhooks → Adicionar**.
+2. Defina a URL: `https://seuglpi/plugins/glpievolutionnotify/front/webhook.php`
+3. Selecione os eventos `approval.*`.
+4. Salve.
 
-Quando uma validação de chamado é criada ou atualizada, o plugin aciona os hooks `item_add` / `item_update` em `TicketValidation` / `CommonITILValidation` e envia a mensagem WhatsApp imediatamente.
+O plugin processará os eventos recebidos e enviará as notificações.
 
-### Cron (fallback)
+## Histórico
 
-Uma tarefa cron (`PluginGlpievolutionnotifyNotification::cronNotify`) é executada a cada minuto e processa validações que não foram capturadas pelos hooks. A tabela de controle `glpi_plugin_evolutionnotify_notified` evita envios duplicados.
-
-### Compatibilidade GLPI 11
-
-O GLPI 11 introduziu validação em múltiplas etapas. O plugin lida com:
-- `itemtype_target` / `items_id_target` para resolução do usuário alvo
-- `comment_submission` / `comment_validation` para comentários de solicitação e aprovação
-- Constantes `\Glpi\Plugin\Hooks` quando disponíveis
-
-## Logs
-
-Os logs são gravados em `evolution_notify.log` no diretório de logs do GLPI (`GLPI_LOG_DIR`). Útil para depurar problemas de entrega.
+Acesse **Administração → Evolution Notify - Histórico** para visualizar todas as notificações enviadas, com data, tipo de evento, telefone e código HTTP de resposta.
 
 ## Estrutura de arquivos
 
@@ -77,11 +90,13 @@ glpievolutionnotify/
 │   ├── save_config.php      # Handler AJAX para salvar configuração
 │   └── test_send.php        # Handler AJAX para teste de envio
 ├── front/
-│   └── config.php           # Página de configuração
+│   ├── config.php           # Página de configuração (multi-entidade + templates)
+│   ├── history.php          # Página de histórico de notificações
+│   └── webhook.php          # Endpoint para webhook nativo GLPI 11
 ├── inc/
-│   └── notification.class.php  # Lógica principal (send, cron, dedup)
+│   └── notification.class.php  # Lógica principal (send, cron, templates, grupos)
 ├── hook.php                 # Install/uninstall + callbacks dos hooks
-├── setup.php                # Metadados do plugin + registro de hooks/cron
+├── setup.php                # Metadados do plugin + registro de hooks/cron/menu
 └── README.md
 ```
 

@@ -1,146 +1,82 @@
 <?php
 
-/**
- * GLPI Evolution Notify - WhatsApp notification via Evolution API.
- *
- * @license   GPLv2+ https://www.gnu.org/licenses/gpl-2.0.html
- * @link      https://github.com/glpi-evolution-notify
- * @since     1.0.0
- */
-
 declare(strict_types=1);
 
 if (!defined('GLPI_ROOT')) {
     die('Sorry.');
 }
 
-/**
- * Handles reading plugin config and sending WhatsApp messages via Evolution API.
- */
 class PluginGlpievolutionnotifyNotification
 {
-    private const CONFIG_TABLE = 'glpi_plugin_evolutionnotify_configs';
+    private const CONFIG_TABLE  = 'glpi_plugin_evolutionnotify_configs';
+    private const NOTIFIED_TABLE = 'glpi_plugin_evolutionnotify_notified';
 
-    /**
-     * Retrieve plugin configuration from database.
-     *
-     * @return array{api_url: string, api_token: string, instance: string,
-     *               send_on_waiting: int, send_on_accepted: int, send_on_refused: int}|null
-     */
-    public static function getConfig(): ?array
+    // ──────────────────────────────────────────────
+    //  CONFIG (entity-aware)
+    // ──────────────────────────────────────────────
+
+    public static function getConfig(?int $entitiesId = null): ?array
     {
         global $DB;
 
+        if ($entitiesId === null && isset($_SESSION['glpiactive_entity'])) {
+            $entitiesId = (int)$_SESSION['glpiactive_entity'];
+        }
+        if ($entitiesId === null) {
+            $entitiesId = 0;
+        }
+
         $table = self::CONFIG_TABLE;
-
         if (!$DB->tableExists($table)) {
-            Toolbox::logInFile('evolution_notify', "[CONFIG] Config table '$table' does not exist.\n", true);
             return null;
         }
 
-        $iterator = $DB->request([
-            'SELECT' => '*',
-            'FROM'   => $table,
-            'LIMIT'  => 1,
-        ]);
-
-        if (count($iterator) === 0) {
-            Toolbox::logInFile('evolution_notify', "[CONFIG] No configuration row found in '$table'.\n", true);
-            return null;
+        // Try entity-specific first, then root
+        foreach ([$entitiesId, 0] as $eid) {
+            $iterator = $DB->request([
+                'SELECT' => '*',
+                'FROM'   => $table,
+                'WHERE'  => ['entities_id' => $eid],
+                'LIMIT'  => 1,
+            ]);
+            if (count($iterator) > 0) {
+                $row = (array)$iterator->current();
+                if (!empty($row['api_url']) && !empty($row['api_token']) && !empty($row['instance'])) {
+                    return self::rowToConfig($row);
+                }
+            }
         }
 
-        $row = $iterator->current();
+        return null;
+    }
 
-        if (empty($row['api_url']) || empty($row['api_token']) || empty($row['instance'])) {
-            Toolbox::logInFile('evolution_notify', "[CONFIG] Incomplete config: api_url, api_token or instance is empty.\n", true);
-            return null;
-        }
-
+    private static function rowToConfig(array $row): array
+    {
         return [
-            'api_url'           => $row['api_url'],
-            'api_token'         => $row['api_token'],
-            'instance'          => $row['instance'],
-            'send_on_waiting'   => (int)$row['send_on_waiting'],
-            'send_on_accepted'  => (int)$row['send_on_accepted'],
-            'send_on_refused'   => (int)$row['send_on_refused'],
+            'entities_id'           => (int)$row['entities_id'],
+            'api_url'               => $row['api_url'],
+            'api_token'             => $row['api_token'],
+            'instance'              => $row['instance'],
+            'send_on_waiting'       => (int)($row['send_on_waiting'] ?? 1),
+            'send_on_accepted'      => (int)($row['send_on_accepted'] ?? 1),
+            'send_on_refused'       => (int)($row['send_on_refused'] ?? 1),
+            'send_on_ticket_created'  => (int)($row['send_on_ticket_created'] ?? 0),
+            'send_on_status_changed'  => (int)($row['send_on_status_changed'] ?? 0),
+            'send_on_solution_added'  => (int)($row['send_on_solution_added'] ?? 0),
+            'template_waiting'        => $row['template_waiting'] ?? null,
+            'template_accepted'       => $row['template_accepted'] ?? null,
+            'template_refused'        => $row['template_refused'] ?? null,
+            'template_ticket_created'  => $row['template_ticket_created'] ?? null,
+            'template_status_changed'  => $row['template_status_changed'] ?? null,
+            'template_solution_added'  => $row['template_solution_added'] ?? null,
         ];
     }
 
-    /**
-     * Send WhatsApp notification for a TicketValidation event.
-     *
-     * @param CommonITILValidation $item
-     * @return void
-     */
-    public static function send(CommonITILValidation $item): void
-    {
-        try {
-            $validationId = (int)$item->fields['id'];
-            $status       = (int)($item->fields['status'] ?? 0);
+    // ──────────────────────────────────────────────
+    //  PHONE RESOLUTION
+    // ──────────────────────────────────────────────
 
-            Toolbox::logInFile('evolution_notify', "[SEND] send() called for TicketValidation #$validationId status=$status\n", true);
-
-            // Debug: dump all fields
-            Toolbox::logInFile('evolution_notify', "[SEND FIELDS] " . json_encode($item->fields, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n", true);
-
-            $eventType = match ($status) {
-                CommonITILValidation::WAITING  => 'WAITING',
-                CommonITILValidation::ACCEPTED => 'ACCEPTED',
-                CommonITILValidation::REFUSED  => 'REFUSED',
-                default                        => null,
-            };
-
-            if ($eventType === null) {
-                Toolbox::logInFile('evolution_notify', "[SEND] Unknown status $status, skipping.\n", true);
-                return;
-            }
-
-            if (self::isNotified($validationId, $eventType)) {
-                Toolbox::logInFile('evolution_notify', "[SEND] Already notified ($eventType), skipping.\n", true);
-                return;
-            }
-
-            $config = self::getConfig();
-            if (!$config) {
-                Toolbox::logInFile('evolution_notify', "[SEND] No config available, aborting.\n", true);
-                return;
-            }
-
-            $userId = self::getTargetUserId($item);
-            if ($userId <= 0) {
-                Toolbox::logInFile('evolution_notify', "[SEND] No target user for TicketValidation #$validationId.\n", true);
-                return;
-            }
-
-            Toolbox::logInFile('evolution_notify', "[SEND] Target user ID: $userId\n", true);
-
-            $phone = self::getValidatorPhone($userId);
-            if (empty($phone)) {
-                Toolbox::logInFile('evolution_notify', "[SEND] No phone for user #$userId.\n", true);
-                return;
-            }
-
-            Toolbox::logInFile('evolution_notify', "[SEND] Phone: $phone\n", true);
-            $phone = self::sanitizePhone($phone);
-
-            $message = self::buildMessage($item);
-            self::postToEvolutionApi($config, $phone, $message, $validationId);
-            self::markNotified($validationId, $eventType, $phone);
-
-        } catch (\Throwable $e) {
-            Toolbox::logInFile('evolution_notify', "[SEND EXCEPTION] " . $e->getMessage()
-                . " in " . $e->getFile() . ":" . $e->getLine()
-                . "\nStack: " . $e->getTraceAsString() . "\n", true);
-        }
-    }
-
-    /**
-     * Fetch the validator's phone number (mobile preferred, fallback to phone).
-     *
-     * @param int $userId
-     * @return string
-     */
-    private static function getValidatorPhone(int $userId): string
+    private static function getUserPhone(int $userId): string
     {
         global $DB;
 
@@ -152,186 +88,473 @@ class PluginGlpievolutionnotifyNotification
         ]);
 
         if (count($iterator) === 0) {
-            Toolbox::logInFile('evolution_notify', "[PHONE] User #$userId not found in glpi_users.\n", true);
             return '';
         }
 
         $row = $iterator->current();
-
         $mobile = trim((string)($row['mobile'] ?? ''));
         $phone  = trim((string)($row['phone']  ?? ''));
-
-        Toolbox::logInFile('evolution_notify', "[PHONE] User #$userId -> mobile='$mobile' phone='$phone'\n", true);
 
         return $mobile !== '' ? $mobile : $phone;
     }
 
-    /**
-     * Strip non-numeric characters and ensure country-code prefix.
-     *
-     * @param string $phone
-     * @return string
-     */
+    public static function getPhonesForUser(int $userId): array
+    {
+        $phone = self::getUserPhone($userId);
+        if ($phone === '') {
+            return [];
+        }
+        return [self::sanitizePhone($phone)];
+    }
+
+    public static function getPhonesForGroup(int $groupId): array
+    {
+        global $DB;
+        $phones = [];
+
+        $iterator = $DB->request([
+            'SELECT' => ['glpi_users.mobile', 'glpi_users.phone'],
+            'FROM'   => 'glpi_groups_users',
+            'WHERE'  => ['glpi_groups_users.groups_id' => $groupId],
+            'LEFT JOIN' => [
+                'glpi_users' => [
+                    'ON' => [
+                        'glpi_groups_users' => 'users_id',
+                        'glpi_users'        => 'id',
+                    ],
+                ],
+            ],
+        ]);
+
+        foreach ($iterator as $row) {
+            $mobile = trim((string)($row['mobile'] ?? ''));
+            $phone  = trim((string)($row['phone']  ?? ''));
+            $p = $mobile !== '' ? $mobile : $phone;
+            if ($p !== '') {
+                $phones[] = self::sanitizePhone($p);
+            }
+        }
+
+        return array_unique($phones);
+    }
+
+    public static function getPhonesForTicketRequester(int $ticketId): array
+    {
+        global $DB;
+        $phones = [];
+
+        $iterator = $DB->request([
+            'SELECT' => ['glpi_users.mobile', 'glpi_users.phone'],
+            'FROM'   => 'glpi_tickets_users',
+            'WHERE'  => [
+                'glpi_tickets_users.tickets_id' => $ticketId,
+                'glpi_tickets_users.type'       => 1,
+            ],
+            'LEFT JOIN' => [
+                'glpi_users' => [
+                    'ON' => [
+                        'glpi_tickets_users' => 'users_id',
+                        'glpi_users'         => 'id',
+                    ],
+                ],
+            ],
+        ]);
+
+        foreach ($iterator as $row) {
+            $mobile = trim((string)($row['mobile'] ?? ''));
+            $phone  = trim((string)($row['phone']  ?? ''));
+            $p = $mobile !== '' ? $mobile : $phone;
+            if ($p !== '') {
+                $phones[] = self::sanitizePhone($p);
+            }
+        }
+
+        return array_unique($phones);
+    }
+
     public static function sanitizePhone(string $phone): string
     {
         $digits = preg_replace('/\D/', '', $phone);
-
         if (strlen($digits) <= 10) {
             $digits = '55' . $digits;
         }
-
         return $digits;
     }
 
-    /**
-     * Build the notification message text.
-     *
-     * @param TicketValidation $item
-     * @return string
-     */
-    private static function buildMessage(CommonITILValidation $item): string
+    // ──────────────────────────────────────────────
+    //  TEMPLATE SYSTEM
+    // ──────────────────────────────────────────────
+
+    private static function getDefaultTemplate(string $eventType): string
     {
-        $ticketId   = (int)($item->fields['tickets_id'] ?? 0);
-        $status     = (int)($item->fields['status'] ?? 0);
-        $ticketTitle = self::getTicketTitle($ticketId);
+        return match ($eventType) {
+            'WAITING'         => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_WAITING,
+            'ACCEPTED'        => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_ACCEPTED,
+            'REFUSED'         => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_REFUSED,
+            'TICKET_CREATED'  => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_TICKET_CREATED,
+            'STATUS_CHANGED'  => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_STATUS_CHANGED,
+            'SOLUTION_ADDED'  => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_SOLUTION_ADDED,
+            default           => PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_WAITING,
+        };
+    }
+
+    private static function getTemplate(string $eventType, array $config): string
+    {
+        $field = match ($eventType) {
+            'WAITING'         => 'template_waiting',
+            'ACCEPTED'        => 'template_accepted',
+            'REFUSED'         => 'template_refused',
+            'TICKET_CREATED'  => 'template_ticket_created',
+            'STATUS_CHANGED'  => 'template_status_changed',
+            'SOLUTION_ADDED'  => 'template_solution_added',
+            default           => null,
+        };
+
+        if ($field !== null && !empty($config[$field])) {
+            return $config[$field];
+        }
+
+        return self::getDefaultTemplate($eventType);
+    }
+
+    private static function replacePlaceholders(string $template, array $placeholders): string
+    {
+        $search  = [];
+        $replace = [];
+
+        foreach ($placeholders as $key => $value) {
+            $search[]  = '{' . $key . '}';
+            $replace[] = $value;
+        }
+
+        // Handle {comment_block} specially — empty if comment is blank
+        if (empty($placeholders['comment'] ?? '')) {
+            $search[]  = '{comment_block}';
+            $replace[] = '';
+        }
+
+        return str_replace($search, $replace, $template);
+    }
+
+    private static function buildPlaceholdersForValidation(
+        CommonITILValidation $item,
+        string $eventType,
+        array $config
+    ): array {
+        $ticketId   = (int)$item->fields['tickets_id'];
+        $status     = (int)$item->fields['status'];
         $cfg = Config::getConfigurationValues('core', ['url_base']);
         $baseUrl = $cfg['url_base'] ?? 'http://localhost/glpi';
-        $ticketUrl  = rtrim($baseUrl, '/') . "/front/ticket.form.php?id=$ticketId";
 
-        $statusLabels = [
+        $targetUserId = self::getTargetUserId($item);
+        $approverUserId = (int)($item->fields['users_id_validate'] ?? 0);
+        $requesterIds   = self::getTicketRequesterIds($ticketId);
+
+        $statusLabel = match ($status) {
             CommonITILValidation::WAITING  => 'Aguardando aprovação',
             CommonITILValidation::ACCEPTED => 'Aprovado',
             CommonITILValidation::REFUSED  => 'Recusado',
-        ];
-
-        $statusLabel = $statusLabels[$status] ?? 'Status desconhecido';
-
-        $approverUserId = (int)($item->fields['users_id_validate'] ?? 0);
-        $validatorName  = self::getUserName($approverUserId > 0 ? $approverUserId : self::getTargetUserId($item));
-
-        $msg = "*GLPI - Notificação de Validação*\n\n"
-            . "Olá *$validatorName*,\n\n"
-            . "O chamado *#$ticketId - $ticketTitle*\n"
-            . "Está com status: *$statusLabel*\n\n";
+            default                        => 'Status desconhecido',
+        };
 
         $commentField = $status === CommonITILValidation::WAITING
             ? 'comment_submission'
             : 'comment_validation';
-        $comment = trim((string)($item->fields[$commentField] ?? ''));
-        if ($comment !== '') {
-            $msg .= "*Comentário:*\n" . strip_tags($comment) . "\n\n";
-        }
+        $comment = trim(strip_tags((string)($item->fields[$commentField] ?? '')));
 
-        $msg .= "Acesse: $ticketUrl";
+        $approverName = self::getUserName($approverUserId > 0 ? $approverUserId : $targetUserId);
+        $firstRequester = $requesterIds[0] ?? 0;
+        $requesterName = self::getUserName($firstRequester);
 
-        return $msg;
+        return [
+            'ticket_id'    => (string)$ticketId,
+            'ticket_title' => self::getTicketTitle($ticketId),
+            'status'       => $statusLabel,
+            'comment'      => $comment,
+            'comment_block'=> "*Comentário:*\n$comment\n\n",
+            'requester'    => $requesterName,
+            'requester_id' => (string)$firstRequester,
+            'approver'     => $approverName,
+            'approver_id'  => (string)($approverUserId > 0 ? $approverUserId : $targetUserId),
+            'url'          => rtrim($baseUrl, '/') . "/front/ticket.form.php?id=$ticketId",
+            'glpi_url'     => rtrim($baseUrl, '/'),
+        ];
     }
 
-    /**
-     * Get ticket title from database.
-     *
-     * @param int $ticketId
-     * @return string
-     */
-    private static function getTicketTitle(int $ticketId): string
+    private static function buildPlaceholdersForTicket(
+        Ticket $ticket,
+        string $eventType,
+        ?string $comment = null
+    ): array {
+        $ticketId = (int)$ticket->fields['id'];
+        $cfg = Config::getConfigurationValues('core', ['url_base']);
+        $baseUrl = $cfg['url_base'] ?? 'http://localhost/glpi';
+        $requesterIds = self::getTicketRequesterIds($ticketId);
+        $firstRequester = $requesterIds[0] ?? 0;
+
+        $statusLabel = match ((int)$ticket->fields['status']) {
+            CommonITILObject::INCOMING      => 'Novo',
+            CommonITILObject::ASSIGNED      => 'Atribuído',
+            CommonITILObject::PLANNED       => 'Planejado',
+            CommonITILObject::WAITING       => 'Aguardando',
+            CommonITILObject::SOLVED        => 'Resolvido',
+            CommonITILObject::CLOSED        => 'Fechado',
+            default                          => 'Desconhecido',
+        };
+
+        $comment = trim(strip_tags((string)($comment ?? '')));
+
+        return [
+            'ticket_id'    => (string)$ticketId,
+            'ticket_title' => self::getTicketTitle($ticketId),
+            'status'       => $statusLabel,
+            'comment'      => $comment,
+            'comment_block'=> $comment !== '' ? "*Comentário:*\n$comment\n\n" : '',
+            'requester'    => self::getUserName($firstRequester),
+            'requester_id' => (string)$firstRequester,
+            'approver'     => '',
+            'approver_id'  => '0',
+            'url'          => rtrim($baseUrl, '/') . "/front/ticket.form.php?id=$ticketId",
+            'glpi_url'     => rtrim($baseUrl, '/'),
+        ];
+    }
+
+    // ──────────────────────────────────────────────
+    //  SENDING
+    // ──────────────────────────────────────────────
+
+    private static function sendToTargets(
+        array $config,
+        array $phones,
+        string $message,
+        string $itemtype,
+        int $itemsId,
+        int $ticketId,
+        string $eventType
+    ): void {
+        foreach ($phones as $phone) {
+            $httpCode = self::postToEvolutionApi($config, $phone, $message, $itemsId);
+            self::markNotified($itemtype, $itemsId, $ticketId, $eventType, $phone, $httpCode);
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  VALIDATION SENDER (ACCEPTED/REFUSED → requester + target, WAITING → target)
+    // ──────────────────────────────────────────────
+
+    public static function sendValidation(CommonITILValidation $item): void
     {
-        global $DB;
+        try {
+            $validationId = (int)$item->fields['id'];
+            $status       = (int)$item->fields['status'];
 
-        $iterator = $DB->request([
-            'SELECT' => ['name'],
-            'FROM'   => 'glpi_tickets',
-            'WHERE'  => ['id' => $ticketId],
-            'LIMIT'  => 1,
-        ]);
+            $eventType = match ($status) {
+                CommonITILValidation::WAITING  => 'WAITING',
+                CommonITILValidation::ACCEPTED => 'ACCEPTED',
+                CommonITILValidation::REFUSED  => 'REFUSED',
+                default                        => null,
+            };
 
-        if (count($iterator) === 0) {
-            return '(sem título)';
+            if ($eventType === null) {
+                return;
+            }
+
+            if (self::isNotified('CommonITILValidation', $validationId, $eventType)) {
+                Toolbox::logInFile('evolution_notify', "[SEND] Already notified ($eventType), skipping.\n", true);
+                return;
+            }
+
+            $ticketId = (int)$item->fields['tickets_id'];
+            $entitiesId = self::getTicketEntitiesId($ticketId);
+
+            $config = self::getConfig($entitiesId);
+            if (!$config) {
+                return;
+            }
+
+            // Check if this event type is enabled
+            $flag = match ($eventType) {
+                'WAITING'  => $config['send_on_waiting'],
+                'ACCEPTED' => $config['send_on_accepted'],
+                'REFUSED'  => $config['send_on_refused'],
+            };
+            if (!$flag) {
+                return;
+            }
+
+            $placeholders = self::buildPlaceholdersForValidation($item, $eventType, $config);
+            $template     = self::getTemplate($eventType, $config);
+            $message      = self::replacePlaceholders($template, $placeholders);
+
+            $allPhones = [];
+            $targetUserId = self::getTargetUserId($item);
+
+            // WAITING → notify target user (or group)
+            if ($eventType === 'WAITING') {
+                $targetType = $item->fields['itemtype_target'] ?? 'User';
+                $targetId   = (int)($item->fields['items_id_target'] ?? 0);
+
+                if ($targetType === 'Group' && $targetId > 0) {
+                    $allPhones = self::getPhonesForGroup($targetId);
+                } elseif ($targetUserId > 0) {
+                    $allPhones = self::getPhonesForUser($targetUserId);
+                }
+            } else {
+                // ACCEPTED/REFUSED → notify requester(s)
+                $allPhones = self::getPhonesForTicketRequester($ticketId);
+
+                // Also notify the approver/user who validated if configured
+                $userId = (int)($item->fields['users_id_validate'] ?? 0);
+                if ($userId > 0) {
+                    $allPhones = array_merge($allPhones, self::getPhonesForUser($userId));
+                }
+            }
+
+            $allPhones = array_values(array_unique($allPhones));
+
+            if (empty($allPhones)) {
+                Toolbox::logInFile('evolution_notify', "[SEND] No phones found for validation #$validationId.\n", true);
+                return;
+            }
+
+            self::sendToTargets(
+                $config, $allPhones, $message,
+                'CommonITILValidation', $validationId, $ticketId, $eventType
+            );
+
+        } catch (\Throwable $e) {
+            Toolbox::logInFile('evolution_notify', "[SEND EXCEPTION] " . $e->getMessage()
+                . " in " . $e->getFile() . ":" . $e->getLine()
+                . "\nStack: " . $e->getTraceAsString() . "\n", true);
         }
-
-        return trim((string)$iterator->current()['name']);
     }
 
-    /**
-     * Get user's real name or login.
-     *
-     * @param int $userId
-     * @return string
-     */
-    private static function getUserName(int $userId): string
+    // ──────────────────────────────────────────────
+    //  TICKET EVENT SENDERS
+    // ──────────────────────────────────────────────
+
+    public static function sendTicketCreated(Ticket $ticket): void
     {
-        global $DB;
+        try {
+            $ticketId = (int)$ticket->fields['id'];
+            $eventType = 'TICKET_CREATED';
 
-        $iterator = $DB->request([
-            'SELECT' => ['name', 'realname', 'firstname'],
-            'FROM'   => 'glpi_users',
-            'WHERE'  => ['id' => $userId],
-            'LIMIT'  => 1,
-        ]);
+            if (self::isNotified('Ticket', $ticketId, $eventType)) {
+                return;
+            }
 
-        if (count($iterator) === 0) {
-            return 'Usuário';
+            $config = self::getConfig((int)$ticket->fields['entities_id']);
+            if (!$config || !$config['send_on_ticket_created']) {
+                return;
+            }
+
+            $placeholders = self::buildPlaceholdersForTicket($ticket, $eventType);
+            $template     = self::getTemplate($eventType, $config);
+            $message      = self::replacePlaceholders($template, $placeholders);
+
+            $phones = self::getPhonesForTicketRequester($ticketId);
+            if (empty($phones)) {
+                return;
+            }
+
+            self::sendToTargets($config, $phones, $message, 'Ticket', $ticketId, $ticketId, $eventType);
+
+        } catch (\Throwable $e) {
+            Toolbox::logInFile('evolution_notify', "[TICKET CREATED EXCEPTION] " . $e->getMessage() . "\n", true);
         }
-
-        $row = $iterator->current();
-
-        $realname = trim((string)($row['realname'] ?? ''));
-        $firstname = trim((string)($row['firstname'] ?? ''));
-
-        if ($realname !== '' && $firstname !== '') {
-            return "$firstname $realname";
-        }
-        if ($realname !== '') {
-            return $realname;
-        }
-        if ($firstname !== '') {
-            return $firstname;
-        }
-
-        return (string)($row['name'] ?? 'Usuário');
     }
 
-    /**
-     * Get the actual target user ID from a validation item.
-     * Handles GLPI 11's itemtype_target/items_id_target system.
-     *
-     * @param CommonITILValidation $item
-     * @return int
-     */
-    private static function getTargetUserId(CommonITILValidation $item): int
+    public static function sendTicketStatusChanged(Ticket $ticket): void
     {
-        $userId = (int)($item->fields['users_id_validate'] ?? 0);
+        try {
+            $ticketId = (int)$ticket->fields['id'];
+            $eventType = 'STATUS_CHANGED';
 
-        if ($userId > 0) {
-            return $userId;
+            if (self::isNotified('Ticket', $ticketId, $eventType)) {
+                return;
+            }
+
+            $config = self::getConfig((int)$ticket->fields['entities_id']);
+            if (!$config || !$config['send_on_status_changed']) {
+                return;
+            }
+
+            $placeholders = self::buildPlaceholdersForTicket($ticket, $eventType);
+            $template     = self::getTemplate($eventType, $config);
+            $message      = self::replacePlaceholders($template, $placeholders);
+
+            $phones = self::getPhonesForTicketRequester($ticketId);
+            if (empty($phones)) {
+                return;
+            }
+
+            self::sendToTargets($config, $phones, $message, 'Ticket', $ticketId, $ticketId, $eventType);
+
+        } catch (\Throwable $e) {
+            Toolbox::logInFile('evolution_notify', "[STATUS CHANGED EXCEPTION] " . $e->getMessage() . "\n", true);
         }
-
-        $targetType = $item->fields['itemtype_target'] ?? '';
-        $targetId   = (int)($item->fields['items_id_target'] ?? 0);
-
-        if ($targetType === 'User' && $targetId > 0) {
-            return $targetId;
-        }
-
-        return 0;
     }
 
-    /**
-     * Check if a validation has already been notified for a given event type.
-     *
-     * @param int    $validationId
-     * @param string $eventType
-     * @return bool
-     */
-    private static function isNotified(int $validationId, string $eventType): bool
+    public static function sendSolutionAdded(Ticket $ticket): void
+    {
+        try {
+            $ticketId = (int)$ticket->fields['id'];
+            $eventType = 'SOLUTION_ADDED';
+
+            if (self::isNotified('Ticket', $ticketId, $eventType)) {
+                return;
+            }
+
+            $config = self::getConfig((int)$ticket->fields['entities_id']);
+            if (!$config || !$config['send_on_solution_added']) {
+                return;
+            }
+
+            // Get the latest solution content
+            global $DB;
+            $solutionText = '';
+            $iter = $DB->request([
+                'SELECT' => ['content'],
+                'FROM'   => 'glpi_itilsolutions',
+                'WHERE'  => ['items_id' => $ticketId, 'itemtype' => 'Ticket'],
+                'ORDER'  => ['date_creation DESC'],
+                'LIMIT'  => 1,
+            ]);
+            if (count($iter) > 0) {
+                $solutionText = (string)$iter->current()['content'];
+            }
+
+            $placeholders = self::buildPlaceholdersForTicket($ticket, $eventType, $solutionText);
+            $template     = self::getTemplate($eventType, $config);
+            $message      = self::replacePlaceholders($template, $placeholders);
+
+            $phones = self::getPhonesForTicketRequester($ticketId);
+            if (empty($phones)) {
+                return;
+            }
+
+            self::sendToTargets($config, $phones, $message, 'Ticket', $ticketId, $ticketId, $eventType);
+
+        } catch (\Throwable $e) {
+            Toolbox::logInFile('evolution_notify', "[SOLUTION ADDED EXCEPTION] " . $e->getMessage() . "\n", true);
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  TRACKING
+    // ──────────────────────────────────────────────
+
+    private static function isNotified(string $itemtype, int $itemsId, string $eventType): bool
     {
         global $DB;
 
         $iterator = $DB->request([
             'SELECT' => ['id'],
-            'FROM'   => 'glpi_plugin_evolutionnotify_notified',
+            'FROM'   => self::NOTIFIED_TABLE,
             'WHERE'  => [
-                'ticketvalidations_id' => $validationId,
-                'event_type'           => $eventType,
+                'itemtype'   => $itemtype,
+                'items_id'   => $itemsId,
+                'event_type' => $eventType,
             ],
             'LIMIT' => 1,
         ]);
@@ -339,58 +562,46 @@ class PluginGlpievolutionnotifyNotification
         return count($iterator) > 0;
     }
 
-    /**
-     * Mark a validation as notified.
-     *
-     * @param int    $validationId
-     * @param string $eventType
-     * @param string $phone
-     * @return void
-     */
-    private static function markNotified(int $validationId, string $eventType, string $phone): void
-    {
+    private static function markNotified(
+        string $itemtype,
+        int $itemsId,
+        int $ticketId,
+        string $eventType,
+        string $phone,
+        int $httpCode
+    ): void {
         global $DB;
 
-        $DB->insertOrDie(
-            'glpi_plugin_evolutionnotify_notified',
-            [
-                'ticketvalidations_id' => $validationId,
-                'event_type'           => $eventType,
-                'phone'                => $phone,
-                'notified_at'          => date('Y-m-d H:i:s'),
-            ]
-        );
+        $DB->insertOrDie(self::NOTIFIED_TABLE, [
+            'itemtype'    => $itemtype,
+            'items_id'    => $itemsId,
+            'tickets_id'  => $ticketId,
+            'event_type'  => $eventType,
+            'phone'       => $phone,
+            'http_code'   => $httpCode,
+            'notified_at' => date('Y-m-d H:i:s'),
+        ]);
     }
 
-    /**
-     * Cron task: process pending ticket validations and send notifications.
-     * Called by GLPI cron every minute.
-     *
-     * @param CronTask|null $task
-     * @return int
-     */
+    // ──────────────────────────────────────────────
+    //  CRON TASK (fallback for validation events)
+    // ──────────────────────────────────────────────
+
     public static function cronNotify(?CronTask $task = null): int
     {
         Toolbox::logInFile('evolution_notify', "[CRON] cronNotify() START\n", true);
 
-        $config = self::getConfig();
+        $config = self::getConfig(0);
         if (!$config) {
-            Toolbox::logInFile('evolution_notify', "[CRON] No config, aborting.\n", true);
             return 0;
         }
 
         global $DB;
 
         $statuses = [];
-        if ($config['send_on_waiting']) {
-            $statuses[] = CommonITILValidation::WAITING;
-        }
-        if ($config['send_on_accepted']) {
-            $statuses[] = CommonITILValidation::ACCEPTED;
-        }
-        if ($config['send_on_refused']) {
-            $statuses[] = CommonITILValidation::REFUSED;
-        }
+        if ($config['send_on_waiting'])  $statuses[] = CommonITILValidation::WAITING;
+        if ($config['send_on_accepted']) $statuses[] = CommonITILValidation::ACCEPTED;
+        if ($config['send_on_refused'])  $statuses[] = CommonITILValidation::REFUSED;
 
         if (empty($statuses)) {
             return 0;
@@ -399,9 +610,7 @@ class PluginGlpievolutionnotifyNotification
         $iterator = $DB->request([
             'SELECT' => '*',
             'FROM'   => 'glpi_itilvalidations',
-            'WHERE'  => [
-                'status' => $statuses,
-            ],
+            'WHERE'  => ['status' => $statuses],
         ]);
 
         $count = 0;
@@ -415,76 +624,100 @@ class PluginGlpievolutionnotifyNotification
                     CommonITILValidation::WAITING  => 'WAITING',
                     CommonITILValidation::ACCEPTED => 'ACCEPTED',
                     CommonITILValidation::REFUSED  => 'REFUSED',
-                    default                        => 'UNKNOWN',
+                    default                        => null,
                 };
 
-                if (self::isNotified($validationId, $eventType)) {
+                if ($eventType === null || self::isNotified('CommonITILValidation', $validationId, $eventType)) {
                     continue;
                 }
 
-                $userId = 0;
+                $ticketId = (int)$row['tickets_id'];
+                $configE = self::getConfig(self::getTicketEntitiesId($ticketId)) ?? $config;
+
+                $flag = match ($eventType) {
+                    'WAITING'  => $configE['send_on_waiting'],
+                    'ACCEPTED' => $configE['send_on_accepted'],
+                    'REFUSED'  => $configE['send_on_refused'],
+                };
+                if (!$flag) {
+                    continue;
+                }
+
+                $targetUserId = 0;
                 $userIdFromField = (int)($row['users_id_validate'] ?? 0);
+                $targetType = $row['itemtype_target'] ?? 'User';
+                $targetId   = (int)($row['items_id_target'] ?? 0);
 
                 if ($userIdFromField > 0) {
-                    $userId = $userIdFromField;
+                    $targetUserId = $userIdFromField;
+                } elseif ($targetType === 'User' && $targetId > 0) {
+                    $targetUserId = $targetId;
+                }
+
+                $allPhones = [];
+
+                if ($eventType === 'WAITING') {
+                    if ($targetType === 'Group' && $targetId > 0) {
+                        $allPhones = self::getPhonesForGroup($targetId);
+                    } elseif ($targetUserId > 0) {
+                        $allPhones = self::getPhonesForUser($targetUserId);
+                    }
                 } else {
-                    $targetType = $row['itemtype_target'] ?? '';
-                    $targetId   = (int)($row['items_id_target'] ?? 0);
-                    if ($targetType === 'User' && $targetId > 0) {
-                        $userId = $targetId;
+                    $allPhones = self::getPhonesForTicketRequester($ticketId);
+                    if ($userIdFromField > 0) {
+                        $allPhones = array_merge($allPhones, self::getPhonesForUser($userIdFromField));
                     }
                 }
 
-                if ($userId <= 0) {
-                    Toolbox::logInFile('evolution_notify',
-                        "[CRON] Validation #$validationId: no target user found (itemtype_target=$targetType, items_id_target=$targetId)\n", true);
+                $allPhones = array_values(array_unique($allPhones));
+                if (empty($allPhones)) {
                     continue;
                 }
 
-                $phone = self::getValidatorPhone($userId);
-                if (empty($phone)) {
-                    Toolbox::logInFile('evolution_notify',
-                        "[CRON] Validation #$validationId: no phone for user #$userId.\n", true);
-                    continue;
-                }
-
-                $phone = self::sanitizePhone($phone);
-
-                $ticketId   = (int)$row['tickets_id'];
-                $ticketTitle = self::getTicketTitle($ticketId);
-                $userName   = self::getUserName($userId);
                 $statusLabel = match ($status) {
                     CommonITILValidation::WAITING  => 'Aguardando aprovação',
                     CommonITILValidation::ACCEPTED => 'Aprovado',
                     CommonITILValidation::REFUSED  => 'Recusado',
                     default                        => 'Status desconhecido',
                 };
-                $cfg = Config::getConfigurationValues('core', ['url_base']);
-                $baseUrl = $cfg['url_base'] ?? 'http://localhost/glpi';
-                $ticketUrl = rtrim($baseUrl, '/') . "/front/ticket.form.php?id=$ticketId";
-
-                $message = "*GLPI - Notificação de Validação*\n\n"
-                    . "Olá *$userName*,\n\n"
-                    . "O chamado *#$ticketId - $ticketTitle*\n"
-                    . "Está com status: *$statusLabel*\n\n";
 
                 $commentField = $status === CommonITILValidation::WAITING
                     ? 'comment_submission'
                     : 'comment_validation';
-                $comment = trim((string)($row[$commentField] ?? ''));
-                if ($comment !== '') {
-                    $message .= "*Comentário:*\n" . strip_tags($comment) . "\n\n";
-                }
+                $comment = trim(strip_tags((string)($row[$commentField] ?? '')));
 
-                $message .= "Acesse: $ticketUrl";
+                $approverName = self::getUserName($userIdFromField > 0 ? $userIdFromField : $targetUserId);
+                $requesterIds = self::getTicketRequesterIds($ticketId);
+                $requesterName = self::getUserName($requesterIds[0] ?? 0);
 
-                self::postToEvolutionApi($config, $phone, $message, $validationId);
-                self::markNotified($validationId, $eventType, $phone);
+                $cfg = Config::getConfigurationValues('core', ['url_base']);
+                $baseUrl = $cfg['url_base'] ?? 'http://localhost/glpi';
+                $ticketUrl = rtrim($baseUrl, '/') . "/front/ticket.form.php?id=$ticketId";
 
-                $count++;
+                $placeholders = [
+                    'ticket_id'    => (string)$ticketId,
+                    'ticket_title' => self::getTicketTitle($ticketId),
+                    'status'       => $statusLabel,
+                    'comment'      => $comment,
+                    'comment_block'=> $comment !== '' ? "*Comentário:*\n$comment\n\n" : '',
+                    'requester'    => $requesterName,
+                    'requester_id' => (string)($requesterIds[0] ?? 0),
+                    'approver'     => $approverName,
+                    'approver_id'  => (string)($userIdFromField > 0 ? $userIdFromField : $targetUserId),
+                    'url'          => $ticketUrl,
+                    'glpi_url'     => rtrim($baseUrl, '/'),
+                ];
 
-                if ($task) {
-                    $task->addVolume(1);
+                $template = self::getTemplate($eventType, $configE);
+                $message  = self::replacePlaceholders($template, $placeholders);
+
+                foreach ($allPhones as $phone) {
+                    $httpCode = self::postToEvolutionApi($configE, $phone, $message, $validationId);
+                    self::markNotified('CommonITILValidation', $validationId, $ticketId, $eventType, $phone, $httpCode);
+                    $count++;
+                    if ($task) {
+                        $task->addVolume(1);
+                    }
                 }
             } catch (\Throwable $e) {
                 Toolbox::logInFile('evolution_notify',
@@ -496,21 +729,132 @@ class PluginGlpievolutionnotifyNotification
         return $count;
     }
 
-    /**
-     * POST message payload to Evolution API via cURL.
-     *
-     * @param array{api_url: string, api_token: string, instance: string} $config
-     * @param string $phone
-     * @param string $message
-     * @param int    $ticketValidationId
-     * @return void
-     */
+    // ──────────────────────────────────────────────
+    //  WEBHOOK HANDLER (GLPI 11 native webhooks)
+    // ──────────────────────────────────────────────
+
+    public static function handleWebhook(array $payload): void
+    {
+        $event  = $payload['event'] ?? '';
+        $item   = $payload['item'] ?? [];
+
+        if (empty($event) || empty($item)) {
+            Toolbox::logInFile('evolution_notify', "[WEBHOOK] Invalid payload.\n", true);
+            return;
+        }
+
+        $validationId = (int)($item['id'] ?? 0);
+        $status       = (int)($item['status'] ?? 0);
+        $ticketId     = (int)($item['tickets_id'] ?? 0);
+
+        Toolbox::logInFile('evolution_notify',
+            "[WEBHOOK] Event=$event validation=$validationId status=$status ticket=$ticketId\n", true);
+
+        $eventType = match ($status) {
+            2 => 'WAITING',
+            3 => 'ACCEPTED',
+            4 => 'REFUSED',
+            default => null,
+        };
+
+        if ($eventType === null) {
+            return;
+        }
+
+        if (self::isNotified('CommonITILValidation', $validationId, $eventType)) {
+            return;
+        }
+
+        $entitiesId = self::getTicketEntitiesId($ticketId);
+        $config = self::getConfig($entitiesId);
+        if (!$config) {
+            return;
+        }
+
+        $flag = match ($eventType) {
+            'WAITING'  => $config['send_on_waiting'],
+            'ACCEPTED' => $config['send_on_accepted'],
+            'REFUSED'  => $config['send_on_refused'],
+        };
+        if (!$flag) {
+            return;
+        }
+
+        $targetUserId = (int)($item['requested_approver_id'] ?? 0);
+        $approverUserId = (int)(($item['approver']['id'] ?? 0));
+
+        $statusLabel = match ($status) {
+            2 => 'Aguardando aprovação',
+            3 => 'Aprovado',
+            4 => 'Recusado',
+            default => 'Status desconhecido',
+        };
+
+        $comment = '';
+        if ($eventType === 'WAITING') {
+            $comment = trim(strip_tags((string)($item['submission_comment'] ?? '')));
+        } else {
+            $comment = trim(strip_tags((string)($item['approval_comment'] ?? '')));
+        }
+
+        $approverName = $item['approver']['name'] ?? self::getUserName($approverUserId > 0 ? $approverUserId : $targetUserId);
+        $requesterName = $item['requester']['name'] ?? '';
+
+        $cfg = Config::getConfigurationValues('core', ['url_base']);
+        $baseUrl = $cfg['url_base'] ?? 'http://localhost/glpi';
+        $ticketUrl = rtrim($baseUrl, '/') . "/front/ticket.form.php?id=$ticketId";
+
+        $placeholders = [
+            'ticket_id'    => (string)$ticketId,
+            'ticket_title' => self::getTicketTitle($ticketId),
+            'status'       => $statusLabel,
+            'comment'      => $comment,
+            'comment_block'=> $comment !== '' ? "*Comentário:*\n$comment\n\n" : '',
+            'requester'    => $requesterName,
+            'requester_id' => (string)((int)($item['requester']['id'] ?? 0)),
+            'approver'     => $approverName,
+            'approver_id'  => (string)$approverUserId,
+            'url'          => $ticketUrl,
+            'glpi_url'     => rtrim($baseUrl, '/'),
+        ];
+
+        $template = self::getTemplate($eventType, $config);
+        $message  = self::replacePlaceholders($template, $placeholders);
+
+        $allPhones = [];
+        if ($eventType === 'WAITING') {
+            $phone = self::getUserPhone($targetUserId);
+            if ($phone !== '') {
+                $allPhones[] = self::sanitizePhone($phone);
+            }
+        } else {
+            $allPhones = self::getPhonesForTicketRequester($ticketId);
+            if ($approverUserId > 0) {
+                $allPhones = array_merge($allPhones, self::getPhonesForUser($approverUserId));
+            }
+        }
+
+        $allPhones = array_values(array_unique($allPhones));
+        if (empty($allPhones)) {
+            return;
+        }
+
+        foreach ($allPhones as $phone) {
+            $httpCode = self::postToEvolutionApi($config, $phone, $message, $validationId);
+            self::markNotified('CommonITILValidation', $validationId, $ticketId, $eventType, $phone, $httpCode);
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    //  EVOLUTION API
+    // ──────────────────────────────────────────────
+
     private static function postToEvolutionApi(
         array $config,
         string $phone,
         string $message,
-        int $ticketValidationId
-    ): void {
+        int $referenceId
+    ): int {
         $url = rtrim($config['api_url'], '/')
             . '/message/sendText/'
             . rawurlencode($config['instance']);
@@ -519,8 +863,6 @@ class PluginGlpievolutionnotifyNotification
             'number' => $phone,
             'text'   => $message,
         ];
-
-        Toolbox::logInFile('evolution_notify', "[API] POST $url\n", true);
 
         $ch = curl_init();
 
@@ -546,17 +888,131 @@ class PluginGlpievolutionnotifyNotification
 
         curl_close($ch);
 
-        $logContext = "TicketValidation #$ticketValidationId -> $phone";
+        $logCtx = "Ref #$referenceId -> $phone";
 
         if ($errno !== 0) {
-            Toolbox::logInFile('evolution_notify', "[API ERROR] cURL failure ($logContext): [$errno] $error\n", true);
-            return;
+            Toolbox::logInFile('evolution_notify', "[API ERROR] cURL ($logCtx): [$errno] $error\n", true);
+            return $errno;
         }
 
         if ($httpCode >= 200 && $httpCode < 300) {
-            Toolbox::logInFile('evolution_notify', "[API OK] Sent ($logContext). HTTP $httpCode\n", true);
+            Toolbox::logInFile('evolution_notify', "[API OK] Sent ($logCtx). HTTP $httpCode\n", true);
         } else {
-            Toolbox::logInFile('evolution_notify', "[API ERROR] HTTP $httpCode ($logContext).\nResponse: $response\n", true);
+            Toolbox::logInFile('evolution_notify', "[API ERROR] HTTP $httpCode ($logCtx).\nResponse: $response\n", true);
         }
+
+        return $httpCode;
+    }
+
+    // ──────────────────────────────────────────────
+    //  HELPERS
+    // ──────────────────────────────────────────────
+
+    private static function getTicketTitle(int $ticketId): string
+    {
+        global $DB;
+
+        $iterator = $DB->request([
+            'SELECT' => ['name'],
+            'FROM'   => 'glpi_tickets',
+            'WHERE'  => ['id' => $ticketId],
+            'LIMIT'  => 1,
+        ]);
+
+        if (count($iterator) === 0) {
+            return '(sem título)';
+        }
+
+        return trim((string)$iterator->current()['name']);
+    }
+
+    private static function getUserName(int $userId): string
+    {
+        global $DB;
+
+        $iterator = $DB->request([
+            'SELECT' => ['name', 'realname', 'firstname'],
+            'FROM'   => 'glpi_users',
+            'WHERE'  => ['id' => $userId],
+            'LIMIT'  => 1,
+        ]);
+
+        if (count($iterator) === 0) {
+            return 'Usuário';
+        }
+
+        $row = $iterator->current();
+
+        $realname  = trim((string)($row['realname'] ?? ''));
+        $firstname = trim((string)($row['firstname'] ?? ''));
+
+        if ($realname !== '' && $firstname !== '') {
+            return "$firstname $realname";
+        }
+        if ($realname !== '') {
+            return $realname;
+        }
+        if ($firstname !== '') {
+            return $firstname;
+        }
+
+        return (string)($row['name'] ?? 'Usuário');
+    }
+
+    private static function getTargetUserId(CommonITILValidation $item): int
+    {
+        $userId = (int)($item->fields['users_id_validate'] ?? 0);
+
+        if ($userId > 0) {
+            return $userId;
+        }
+
+        $targetType = $item->fields['itemtype_target'] ?? '';
+        $targetId   = (int)($item->fields['items_id_target'] ?? 0);
+
+        if ($targetType === 'User' && $targetId > 0) {
+            return $targetId;
+        }
+
+        return 0;
+    }
+
+    private static function getTicketRequesterIds(int $ticketId): array
+    {
+        global $DB;
+
+        $ids  = [];
+        $iter = $DB->request([
+            'SELECT' => ['users_id'],
+            'FROM'   => 'glpi_tickets_users',
+            'WHERE'  => [
+                'tickets_id' => $ticketId,
+                'type'       => 1,
+            ],
+        ]);
+
+        foreach ($iter as $row) {
+            $ids[] = (int)$row['users_id'];
+        }
+
+        return $ids;
+    }
+
+    private static function getTicketEntitiesId(int $ticketId): int
+    {
+        global $DB;
+
+        $iter = $DB->request([
+            'SELECT' => ['entities_id'],
+            'FROM'   => 'glpi_tickets',
+            'WHERE'  => ['id' => $ticketId],
+            'LIMIT'  => 1,
+        ]);
+
+        if (count($iter) > 0) {
+            return (int)$iter->current()['entities_id'];
+        }
+
+        return 0;
     }
 }

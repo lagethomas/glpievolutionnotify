@@ -1,26 +1,13 @@
 <?php
 
-/**
- * GLPI Evolution Notify - WhatsApp Notification via Evolution API
- *
- * Monitors Ticket Validation events and sends WhatsApp notifications.
- *
- * @license   GPLv2+ https://www.gnu.org/licenses/gpl-2.0.html
- * @link      https://github.com/glpi-evolution-notify
- * @since     1.0.0
- */
-
 declare(strict_types=1);
 
 if (!defined('GLPI_ROOT')) {
     die('Sorry.');
 }
 
-define('PLUGIN_GLPINVOLUTIONNOTIFY_VERSION', '1.0.0');
+define('PLUGIN_GLPINVOLUTIONNOTIFY_VERSION', '2.0.0');
 
-/**
- * Plugin initialization: register hooks, cron and configuration.
- */
 function plugin_init_glpievolutionnotify(): void
 {
     Toolbox::logInFile('evolution_notify', "[SETUP] plugin_init_glpievolutionnotify() called\n", true);
@@ -28,48 +15,58 @@ function plugin_init_glpievolutionnotify(): void
 
     $PLUGIN_HOOKS['csrf_compliant']['glpievolutionnotify'] = true;
 
+    // --- Cron ---
     $PLUGIN_HOOKS['cron']['glpievolutionnotify'] = [
         PluginGlpievolutionnotifyNotification::class,
     ];
 
+    // --- Validation hooks ---
     $hookItemAdd    = class_exists(\Glpi\Plugin\Hooks::class) ? \Glpi\Plugin\Hooks::ITEM_ADD : 'item_add';
     $hookItemUpdate = class_exists(\Glpi\Plugin\Hooks::class) ? \Glpi\Plugin\Hooks::ITEM_UPDATE : 'item_update';
 
-    $targetClasses = [
+    $validationClasses = [
         \TicketValidation::class,
         \CommonITILValidation::class,
     ];
 
-    foreach ($targetClasses as $class) {
+    foreach ($validationClasses as $class) {
         if (class_exists($class)) {
             $PLUGIN_HOOKS[$hookItemAdd]['glpievolutionnotify'][$class]
                 = 'plugin_glpievolutionnotify_item_add';
             $PLUGIN_HOOKS[$hookItemUpdate]['glpievolutionnotify'][$class]
                 = 'plugin_glpievolutionnotify_item_update';
-        } else {
-            Toolbox::logInFile('evolution_notify',
-                "[SETUP] Class $class not found, skipping hook.\n", true);
         }
     }
 
+    // --- Ticket hooks ---
+    if (class_exists(\Ticket::class)) {
+        $PLUGIN_HOOKS[$hookItemAdd]['glpievolutionnotify'][\Ticket::class]
+            = 'plugin_glpievolutionnotify_item_add_ticket';
+        $PLUGIN_HOOKS[$hookItemUpdate]['glpievolutionnotify'][\Ticket::class]
+            = 'plugin_glpievolutionnotify_item_update_ticket';
+    }
+
+    // --- Solution hooks (ITILSolution) ---
+    if (class_exists(\ITILSolution::class)) {
+        $PLUGIN_HOOKS[$hookItemAdd]['glpievolutionnotify'][\ITILSolution::class]
+            = 'plugin_glpievolutionnotify_item_add_solution';
+    }
+
+    // --- Menu ---
     if (class_exists(\Session::class) && \Session::haveRight('config', UPDATE)) {
         $PLUGIN_HOOKS['config_page']['glpievolutionnotify'] = 'front/config.php';
+        $PLUGIN_HOOKS['redefine_menus']['glpievolutionnotify'] = 'plugin_glpievolutionnotify_redefine_menus';
     }
 
     Toolbox::logInFile('evolution_notify', "[SETUP] plugin_init finished.\n", true);
 }
 
-/**
- * Plugin version metadata.
- *
- * @return array<string, mixed>
- */
 function plugin_version_glpievolutionnotify(): array
 {
     return [
         'name'           => 'Evolution Notify',
         'version'        => PLUGIN_GLPINVOLUTIONNOTIFY_VERSION,
-        'author'         => 'GLPI Evolution Team',
+        'author'         => 'Thomas Marcelino',
         'license'        => 'GPLv2+',
         'homepage'       => 'https://github.com/glpi-evolution-notify',
         'minGlpiVersion' => '10.0.0',
@@ -77,11 +74,6 @@ function plugin_version_glpievolutionnotify(): array
     ];
 }
 
-/**
- * Prerequisites check.
- *
- * @return bool
- */
 function plugin_glpievolutionnotify_check_prerequisites(): bool
 {
     if (version_compare(GLPI_VERSION, '10.0.0', 'lt')) {
@@ -91,11 +83,6 @@ function plugin_glpievolutionnotify_check_prerequisites(): bool
     return true;
 }
 
-/**
- * Config check.
- *
- * @return bool
- */
 function plugin_glpievolutionnotify_check_config(): bool
 {
     return true;

@@ -1,13 +1,5 @@
 <?php
 
-/**
- * GLPI Evolution Notify - Hook callbacks and install/uninstall.
- *
- * @license   GPLv2+ https://www.gnu.org/licenses/gpl-2.0.html
- * @link      https://github.com/glpi-evolution-notify
- * @since     1.0.0
- */
-
 declare(strict_types=1);
 
 if (!defined('GLPI_ROOT')) {
@@ -16,12 +8,58 @@ if (!defined('GLPI_ROOT')) {
 
 define('PLUGIN_GLPINVOLUTIONNOTIFY_DIR', __DIR__);
 
-/**
- * Install plugin: create config and tracking tables.
- *
- * @param array $params
- * @return bool
- */
+define('PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_WAITING',
+    "*GLPI - Notificação de Validação*\n\n"
+    . "Olá *{approver}*,\n\n"
+    . "O chamado *{ticket_id} - {ticket_title}*\n"
+    . "Está com status: *{status}*\n\n"
+    . "{comment_block}"
+    . "Acesse: {url}"
+);
+
+define('PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_ACCEPTED',
+    "*GLPI - Validação Aprovada*\n\n"
+    . "Olá *{requester}*,\n\n"
+    . "O chamado *{ticket_id} - {ticket_title}*\n"
+    . "Foi *{status}* por *{approver}*\n\n"
+    . "{comment_block}"
+    . "Acesse: {url}"
+);
+
+define('PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_REFUSED',
+    "*GLPI - Validação Recusada*\n\n"
+    . "Olá *{requester}*,\n\n"
+    . "O chamado *{ticket_id} - {ticket_title}*\n"
+    . "Foi *{status}* por *{approver}*\n\n"
+    . "{comment_block}"
+    . "Acesse: {url}"
+);
+
+define('PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_TICKET_CREATED',
+    "*GLPI - Novo Chamado*\n\n"
+    . "Olá *{requester}*,\n\n"
+    . "Seu chamado *{ticket_id} - {ticket_title}*\n"
+    . "Foi criado com sucesso.\n\n"
+    . "Acesse: {url}"
+);
+
+define('PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_STATUS_CHANGED',
+    "*GLPI - Status Alterado*\n\n"
+    . "Olá *{requester}*,\n\n"
+    . "O chamado *{ticket_id} - {ticket_title}*\n"
+    . "Teve o status alterado para: *{status}*\n\n"
+    . "Acesse: {url}"
+);
+
+define('PLUGIN_EVOLUTION_NOTIFY_TEMPLATE_SOLUTION_ADDED',
+    "*GLPI - Solução Adicionada*\n\n"
+    . "Olá *{requester}*,\n\n"
+    . "O chamado *{ticket_id} - {ticket_title}*\n"
+    . "Possui uma nova solução.\n\n"
+    . "{comment_block}"
+    . "Acesse: {url}"
+);
+
 function plugin_glpievolutionnotify_install(array $params = []): bool
 {
     global $DB;
@@ -33,13 +71,24 @@ function plugin_glpievolutionnotify_install(array $params = []): bool
         if (!$DB->tableExists($table1)) {
             $query = "CREATE TABLE `$table1` (
                 `id` int unsigned NOT NULL AUTO_INCREMENT,
+                `entities_id` int NOT NULL DEFAULT 0,
                 `api_url` varchar(255) NOT NULL DEFAULT '',
                 `api_token` varchar(255) NOT NULL DEFAULT '',
                 `instance` varchar(255) NOT NULL DEFAULT '',
                 `send_on_waiting` tinyint(1) NOT NULL DEFAULT 1,
                 `send_on_accepted` tinyint(1) NOT NULL DEFAULT 1,
                 `send_on_refused` tinyint(1) NOT NULL DEFAULT 1,
-                PRIMARY KEY (`id`)
+                `send_on_ticket_created` tinyint(1) NOT NULL DEFAULT 0,
+                `send_on_status_changed` tinyint(1) NOT NULL DEFAULT 0,
+                `send_on_solution_added` tinyint(1) NOT NULL DEFAULT 0,
+                `template_waiting` text DEFAULT NULL,
+                `template_accepted` text DEFAULT NULL,
+                `template_refused` text DEFAULT NULL,
+                `template_ticket_created` text DEFAULT NULL,
+                `template_status_changed` text DEFAULT NULL,
+                `template_solution_added` text DEFAULT NULL,
+                PRIMARY KEY (`id`),
+                KEY `entities_id` (`entities_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
 
             $result = $DB->doQuery($query);
@@ -47,23 +96,41 @@ function plugin_glpievolutionnotify_install(array $params = []): bool
                 Toolbox::logInFile('evolution_notify', "[INSTALL ERROR] Failed to create config table: " . $DB->error() . "\n", true);
                 return false;
             }
-
-            $DB->insertOrDie($table1, [
-                'api_url'   => 'http://localhost:8080',
-                'api_token' => '',
-                'instance'  => 'default',
-            ]);
+        } else {
+            $migrations = [
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `entities_id` int NOT NULL DEFAULT 0 AFTER `id`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `send_on_ticket_created` tinyint(1) NOT NULL DEFAULT 0 AFTER `send_on_refused`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `send_on_status_changed` tinyint(1) NOT NULL DEFAULT 0 AFTER `send_on_ticket_created`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `send_on_solution_added` tinyint(1) NOT NULL DEFAULT 0 AFTER `send_on_status_changed`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `template_waiting` text DEFAULT NULL AFTER `send_on_solution_added`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `template_accepted` text DEFAULT NULL AFTER `template_waiting`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `template_refused` text DEFAULT NULL AFTER `template_accepted`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `template_ticket_created` text DEFAULT NULL AFTER `template_refused`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `template_status_changed` text DEFAULT NULL AFTER `template_ticket_created`",
+                "ALTER TABLE `$table1` ADD COLUMN IF NOT EXISTS `template_solution_added` text DEFAULT NULL AFTER `template_status_changed`",
+            ];
+            foreach ($migrations as $sql) {
+                try {
+                    $DB->doQuery($sql);
+                } catch (\Throwable $e) {
+                    Toolbox::logInFile('evolution_notify', "[MIGRATION] Skipped (likely already exists): " . $e->getMessage() . "\n", true);
+                }
+            }
         }
 
         if (!$DB->tableExists($table2)) {
             $query = "CREATE TABLE `$table2` (
                 `id` int unsigned NOT NULL AUTO_INCREMENT,
-                `ticketvalidations_id` int unsigned NOT NULL,
-                `event_type` varchar(20) NOT NULL DEFAULT '',
+                `itemtype` varchar(50) NOT NULL DEFAULT '',
+                `items_id` int unsigned NOT NULL DEFAULT 0,
+                `tickets_id` int unsigned NOT NULL DEFAULT 0,
+                `event_type` varchar(30) NOT NULL DEFAULT '',
                 `phone` varchar(30) NOT NULL DEFAULT '',
+                `http_code` int NOT NULL DEFAULT 0,
                 `notified_at` datetime NOT NULL,
                 PRIMARY KEY (`id`),
-                KEY `ticketvalidations_id` (`ticketvalidations_id`)
+                KEY `item` (`itemtype`, `items_id`),
+                KEY `tickets_id` (`tickets_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
 
             $result = $DB->doQuery($query);
@@ -71,6 +138,37 @@ function plugin_glpievolutionnotify_install(array $params = []): bool
                 Toolbox::logInFile('evolution_notify', "[INSTALL ERROR] Failed to create notified table: " . $DB->error() . "\n", true);
                 return false;
             }
+        } else {
+            // Drop old column that conflicts with new schema
+            $oldCol = $DB->doQuery("SHOW COLUMNS FROM `$table2` LIKE 'ticketvalidations_id'");
+            if ($oldCol && $oldCol->num_rows > 0) {
+                $DB->doQuery("ALTER TABLE `$table2` DROP COLUMN `ticketvalidations_id`");
+            }
+
+            $migrations2 = [
+                "ALTER TABLE `$table2` ADD COLUMN IF NOT EXISTS `itemtype` varchar(50) NOT NULL DEFAULT '' AFTER `id`",
+                "ALTER TABLE `$table2` ADD COLUMN IF NOT EXISTS `items_id` int unsigned NOT NULL DEFAULT 0 AFTER `itemtype`",
+                "ALTER TABLE `$table2` ADD COLUMN IF NOT EXISTS `tickets_id` int unsigned NOT NULL DEFAULT 0 AFTER `items_id`",
+                "ALTER TABLE `$table2` ADD COLUMN IF NOT EXISTS `http_code` int NOT NULL DEFAULT 0 AFTER `phone`",
+                "ALTER TABLE `$table2` MODIFY COLUMN `event_type` varchar(30) NOT NULL DEFAULT ''",
+            ];
+            foreach ($migrations2 as $sql) {
+                try {
+                    $DB->doQuery($sql);
+                } catch (\Throwable $e) {
+                    Toolbox::logInFile('evolution_notify', "[MIGRATION] Skipped: " . $e->getMessage() . "\n", true);
+                }
+            }
+        }
+
+        $iterator = $DB->request(['SELECT' => 'id', 'FROM' => $table1, 'LIMIT' => 1]);
+        if (count($iterator) === 0) {
+            $DB->insertOrDie($table1, [
+                'entities_id' => 0,
+                'api_url'     => 'http://localhost:8080',
+                'api_token'   => '',
+                'instance'    => 'default',
+            ]);
         }
 
         CronTask::Register(PluginGlpievolutionnotifyNotification::class, 'cronNotify', MINUTE_TIMESTAMP, [
@@ -88,12 +186,6 @@ function plugin_glpievolutionnotify_install(array $params = []): bool
     }
 }
 
-/**
- * Uninstall plugin: drop tables.
- *
- * @param array $params
- * @return bool
- */
 function plugin_glpievolutionnotify_uninstall(array $params = []): bool
 {
     global $DB;
@@ -111,56 +203,93 @@ function plugin_glpievolutionnotify_uninstall(array $params = []): bool
     }
 }
 
-/**
- * Hook: fired after a TicketValidation is added.
- *
- * @param CommonITILValidation $item
- * @return void
- */
 function plugin_glpievolutionnotify_item_add(CommonITILValidation $item): void
 {
-    Toolbox::logInFile('evolution_notify', "[HOOK] item_add called for " . get_class($item) . " #{$item->fields['id']} status={$item->fields['status']}\n", true);
+    Toolbox::logInFile('evolution_notify', "[HOOK] item_add " . get_class($item) . " #{$item->fields['id']} status={$item->fields['status']}\n", true);
 
-    $config = PluginGlpievolutionnotifyNotification::getConfig();
-    if (!$config) {
-        return;
-    }
-
-    if ((int)$item->fields['status'] === CommonITILValidation::WAITING
-        && (int)($config['send_on_waiting'] ?? 1) === 1
-    ) {
-        PluginGlpievolutionnotifyNotification::send($item);
+    if ((int)$item->fields['status'] === CommonITILValidation::WAITING) {
+        PluginGlpievolutionnotifyNotification::sendValidation($item);
     }
 }
 
-/**
- * Hook: fired after a TicketValidation is updated.
- *
- * @param CommonITILValidation $item
- * @return void
- */
 function plugin_glpievolutionnotify_item_update(CommonITILValidation $item): void
 {
-    Toolbox::logInFile('evolution_notify', "[HOOK] item_update called for " . get_class($item) . " #{$item->fields['id']}\n", true);
-
-    $config = PluginGlpievolutionnotifyNotification::getConfig();
-    if (!$config) {
-        return;
-    }
+    Toolbox::logInFile('evolution_notify', "[HOOK] item_update " . get_class($item) . " #{$item->fields['id']}\n", true);
 
     if (!in_array('status', $item->updates, true)) {
         return;
     }
 
-    $newStatus = (int)$item->fields['status'];
+    PluginGlpievolutionnotifyNotification::sendValidation($item);
+}
 
-    $statusMap = [
-        CommonITILValidation::WAITING  => (int)($config['send_on_waiting']  ?? 1),
-        CommonITILValidation::ACCEPTED => (int)($config['send_on_accepted'] ?? 1),
-        CommonITILValidation::REFUSED  => (int)($config['send_on_refused']  ?? 1),
+function plugin_glpievolutionnotify_item_add_ticket(CommonDBTM $item): void
+{
+    if (!$item instanceof Ticket) {
+        return;
+    }
+
+    Toolbox::logInFile('evolution_notify', "[HOOK] ticket_add #{$item->fields['id']}\n", true);
+
+    $config = PluginGlpievolutionnotifyNotification::getConfig((int)$item->fields['entities_id']);
+    if (!$config || !$config['send_on_ticket_created']) {
+        return;
+    }
+
+    PluginGlpievolutionnotifyNotification::sendTicketCreated($item);
+}
+
+function plugin_glpievolutionnotify_item_update_ticket(CommonDBTM $item): void
+{
+    if (!$item instanceof Ticket || !in_array('status', $item->updates, true)) {
+        return;
+    }
+
+    Toolbox::logInFile('evolution_notify', "[HOOK] ticket_status_change #{$item->fields['id']} -> {$item->fields['status']}\n", true);
+
+    $config = PluginGlpievolutionnotifyNotification::getConfig((int)$item->fields['entities_id']);
+    if (!$config || !$config['send_on_status_changed']) {
+        return;
+    }
+
+    PluginGlpievolutionnotifyNotification::sendTicketStatusChanged($item);
+}
+
+function plugin_glpievolutionnotify_item_add_solution(CommonDBTM $item): void
+{
+    $ticketId = (int)($item->fields['items_id'] ?? 0);
+    if ($ticketId <= 0) {
+        return;
+    }
+
+    $ticket = new Ticket();
+    if (!$ticket->getFromDB($ticketId)) {
+        return;
+    }
+
+    Toolbox::logInFile('evolution_notify', "[HOOK] solution_added for ticket #$ticketId\n", true);
+
+    $config = PluginGlpievolutionnotifyNotification::getConfig((int)$ticket->fields['entities_id']);
+    if (!$config || !$config['send_on_solution_added']) {
+        return;
+    }
+
+    PluginGlpievolutionnotifyNotification::sendSolutionAdded($ticket);
+}
+
+function plugin_glpievolutionnotify_redefine_menus(array $menus): array
+{
+    $menus['admin']['content']['evolutionnotify'] = [
+        'title' => 'Evolution Notify',
+        'page'  => '/plugins/glpievolutionnotify/front/config.php',
+        'icon'  => 'fab fa-whatsapp',
     ];
 
-    if (isset($statusMap[$newStatus]) && $statusMap[$newStatus] === 1) {
-        PluginGlpievolutionnotifyNotification::send($item);
-    }
+    $menus['admin']['content']['evolutionnotify_history'] = [
+        'title' => 'Evolution Notify - Histórico',
+        'page'  => '/plugins/glpievolutionnotify/front/history.php',
+        'icon'  => 'fas fa-history',
+    ];
+
+    return $menus;
 }
