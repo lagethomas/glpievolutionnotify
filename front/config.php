@@ -496,6 +496,50 @@ $csrfToken = Session::getNewCSRFToken();
 
 /* Hide GLPI's default big title */
 header#header + div:not(.evo-container) { display: none; }
+
+.ph-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #f8f9fa;
+    border: 1px solid var(--evo-border);
+    border-radius: var(--evo-radius-sm);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.ph-item:hover {
+    background: var(--evo-primary-light);
+    border-color: var(--evo-primary);
+    transform: translateY(-1px);
+}
+
+.ph-item:active {
+    transform: scale(0.97);
+}
+
+.ph-item.copied {
+    background: #d4edda;
+    border-color: #28a745;
+}
+
+.ph-code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--evo-primary-dark);
+    background: #fff;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    white-space: nowrap;
+}
+
+.ph-desc {
+    font-size: 12px;
+    color: var(--evo-text-secondary);
+}
 </style>
 
 <div class="evo-container">
@@ -637,25 +681,19 @@ header#header + div:not(.evo-container) { display: none; }
     <!-- Templates (full width) -->
     <div class="evo-card evo-card-full">
     <div class="evo-card">
-        <div class="evo-card-header">
-            <i class="fas fa-edit"></i> Modelos de Mensagem
-        </div>
+    <div class="evo-card-header">
+        <i class="fas fa-edit"></i> Modelos de Mensagem
+        <button type="button" class="evo-btn evo-btn-placeholder" id="btn-show-placeholders" style="margin-left:auto;padding:5px 14px;font-size:12px;background:#e8e8e8;border:none;border-radius:6px;cursor:pointer;">
+            <i class="fas fa-code"></i> Placeholders
+        </button>
+    </div>
         <div class="evo-card-body">
             <p style="margin:0 0 8px;font-size:13px;color:var(--evo-text-secondary);">
                 Personalize o texto das mensagens WhatsApp. Deixe em branco para usar o padrão.
             </p>
 
-            <div class="evo-placeholder-hint">
-                <strong>Placeholders disponíveis:</strong><br>
-                <code>{ticket_id}</code> — ID do chamado &nbsp;
-                <code>{ticket_title}</code> — Título &nbsp;
-                <code>{status}</code> — Status &nbsp;
-                <code>{comment}</code> — Comentário &nbsp;
-                <code>{comment_block}</code> — Bloco com "Comentário:" (vazio se sem comentário) &nbsp;
-                <code>{requester}</code> — Nome do solicitante &nbsp;
-                <code>{approver}</code> — Nome do aprovador &nbsp;
-                <code>{url}</code> — Link do chamado &nbsp;
-                <code>{glpi_url}</code> — URL base do GLPI
+            <div class="evo-placeholder-hint" id="evo-placeholder-bar" style="cursor:pointer;" onclick="document.getElementById('btn-show-placeholders').click()">
+                <i class="fas fa-info-circle"></i> Clique em <strong>Placeholders</strong> para ver todos os códigos disponíveis e copiá-los.
             </div>
 
             <div class="evo-grid-2">
@@ -730,6 +768,71 @@ header#header + div:not(.evo-container) { display: none; }
             <button type="button" class="evo-btn evo-btn-primary" id="btn-send-test-msg">
                 <i class="fab fa-whatsapp"></i> Enviar
             </button>
+        </div>
+    </div>
+</div>
+
+<!-- Placeholders Modal -->
+<div class="evo-modal-overlay" id="modal-placeholders">
+    <div class="evo-modal" style="max-width:580px;">
+        <div class="evo-modal-header">
+            <h3><i class="fas fa-code" style="color:var(--evo-primary-dark)"></i> Placeholders Disponíveis</h3>
+            <button type="button" class="evo-modal-close" data-close-modal>&times;</button>
+        </div>
+        <div class="evo-modal-body">
+            <p style="margin:0 0 12px;font-size:13px;color:var(--evo-text-secondary);">
+                Clique em um placeholder para copiá-lo. Use nos modelos de mensagem acima.
+            </p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;" id="placeholder-list">
+                <div class="ph-item" data-ph="{ticket_id}">
+                    <code class="ph-code">{ticket_id}</code>
+                    <span class="ph-desc">ID do chamado</span>
+                </div>
+                <div class="ph-item" data-ph="{ticket_title}">
+                    <code class="ph-code">{ticket_title}</code>
+                    <span class="ph-desc">Título do chamado</span>
+                </div>
+                <div class="ph-item" data-ph="{status}">
+                    <code class="ph-code">{status}</code>
+                    <span class="ph-desc">Status (ex: Aprovado)</span>
+                </div>
+                <div class="ph-item" data-ph="{comment}">
+                    <code class="ph-code">{comment}</code>
+                    <span class="ph-desc">Comentário da validação</span>
+                </div>
+                <div class="ph-item" data-ph="{comment_block}">
+                    <code class="ph-code">{comment_block}</code>
+                    <span class="ph-desc">Bloco "Comentário:" inteiro (vazio se sem comentário)</span>
+                </div>
+                <div class="ph-item" data-ph="{requester}">
+                    <code class="ph-code">{requester}</code>
+                    <span class="ph-desc">Nome do solicitante</span>
+                </div>
+                <div class="ph-item" data-ph="{requester_id}">
+                    <code class="ph-code">{requester_id}</code>
+                    <span class="ph-desc">ID do solicitante</span>
+                </div>
+                <div class="ph-item" data-ph="{approver}">
+                    <code class="ph-code">{approver}</code>
+                    <span class="ph-desc">Nome do aprovador</span>
+                </div>
+                <div class="ph-item" data-ph="{approver_id}">
+                    <code class="ph-code">{approver_id}</code>
+                    <span class="ph-desc">ID do aprovador</span>
+                </div>
+                <div class="ph-item" data-ph="{url}">
+                    <code class="ph-code">{url}</code>
+                    <span class="ph-desc">Link direto para o chamado</span>
+                </div>
+                <div class="ph-item" data-ph="{glpi_url}">
+                    <code class="ph-code">{glpi_url}</code>
+                    <span class="ph-desc">URL base do GLPI</span>
+                </div>
+            </div>
+        </div>
+        <div class="evo-modal-footer">
+            <div id="ph-copied-msg" style="font-size:13px;color:#28a745;display:none;"><i class="fas fa-check-circle"></i> Copiado!</div>
+            <button type="button" class="evo-btn evo-btn-secondary" data-close-modal>Fechar</button>
         </div>
     </div>
 </div>
@@ -844,6 +947,34 @@ header#header + div:not(.evo-container) { display: none; }
                 btn.prop('disabled', false).html('<i class="fab fa-whatsapp"></i> Enviar');
             }
         });
+    });
+
+    // Placeholders modal
+    function openPlaceholders() {
+        $('#modal-placeholders').addClass('active');
+        $('#ph-copied-msg').hide();
+    }
+    function closePlaceholders() {
+        $('#modal-placeholders').removeClass('active');
+    }
+    $('#btn-show-placeholders').on('click', openPlaceholders);
+    $('#modal-placeholders [data-close-modal]').on('click', closePlaceholders);
+
+    // Click to copy
+    $('#placeholder-list').on('click', '.ph-item', function() {
+        var text = $(this).data('ph');
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch(e) {}
+        document.body.removeChild(ta);
+
+        $('.ph-item').removeClass('copied');
+        $(this).addClass('copied');
+        $('#ph-copied-msg').fadeIn(200).delay(1500).fadeOut(200);
     });
 })();
 </script>
