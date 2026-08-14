@@ -238,7 +238,7 @@ Consulte [LICENSE](https://www.gnu.org/licenses/gpl-2.0.html) para o texto compl
 
 ## 👨‍💻 Autor
 
-**Lago Thomas** - [@lagethomas](https://github.com/lagethomas)
+**Thomas Lage** - [@lagethomas](https://github.com/lagethomas)
 
 ---
 
